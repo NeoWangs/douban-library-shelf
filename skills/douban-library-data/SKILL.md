@@ -1,11 +1,11 @@
 ---
 name: douban-library-data
-description: Fetch Douban Reading book subject pages and update a library shelf web app's category-manager/books-data.js directly. Use when the user provides book.douban.com subject links, a TSV/table of Douban book links, or asks to crawl Douban book metadata into browser data instead of generating Markdown notes.
+description: Fetch Douban Reading book subject pages and update a library shelf web app's books-data.js directly. Use when the user provides book.douban.com subject links, a TSV/table of Douban book links, or asks to crawl Douban book metadata into browser data instead of generating Markdown notes.
 ---
 
 # Douban Library Data
 
-Use this skill to collect Douban Reading book metadata and write `category-manager/books-data.js`.
+Use this skill to collect Douban Reading book metadata and write `books-data.js`.
 
 This is adapted from the Douban Book MD workflow, but it does not create `.md` files. It fetches `book.douban.com/subject/<id>/` pages, extracts metadata, infers a category, and writes JavaScript data for the category manager page.
 
@@ -14,25 +14,25 @@ This is adapted from the Douban Book MD workflow, but it does not create `.md` f
 For a TSV with a header row and a Douban subject URL column:
 
 ```bash
-node skills/douban-library-data/scripts/douban_books_data.mjs --input douban_books.tsv --out category-manager/books-data.js --delay-ms 3000
+node skills/douban-library-data/scripts/douban_books_data.mjs --input douban_books.tsv --out books-data.js --delay-ms 3000
 ```
 
 For safer long batches, use random delay and small batches:
 
 ```bash
-node skills/douban-library-data/scripts/douban_books_data.mjs --input douban_books.tsv --out category-manager/books-data.js --start 1 --limit 30 --delay-min-ms 10000 --delay-max-ms 25000
+node skills/douban-library-data/scripts/douban_books_data.mjs --input douban_books.tsv --out books-data.js --start 1 --limit 30 --delay-min-ms 10000 --delay-max-ms 25000
 ```
 
 For one book:
 
 ```bash
-node skills/douban-library-data/scripts/douban_books_data.mjs --url https://book.douban.com/subject/1084336/ --out category-manager/books-data.js
+node skills/douban-library-data/scripts/douban_books_data.mjs --url https://book.douban.com/subject/1084336/ --out books-data.js
 ```
 
 Then check the app script:
 
 ```bash
-node --check category-manager/app.js
+node --check app.js
 node --check skills/douban-library-data/scripts/douban_books_data.mjs
 ```
 
@@ -40,7 +40,7 @@ node --check skills/douban-library-data/scripts/douban_books_data.mjs
 
 - `--input FILE`: TSV input. The script finds the first `https://book.douban.com/subject/<id>/` cell in each data row.
 - `--url URL`: Fetch one Douban subject URL.
-- `--out FILE`: Output path. Defaults to `category-manager/books-data.js`.
+- `--out FILE`: Output path. Defaults to `books-data.js`.
 - `--start N`: Start at 1-based TSV data row N.
 - `--limit N`: Process at most N rows.
 - `--delay-ms N`: Fixed delay between requests.
