@@ -1,0 +1,6 @@
+interface:
+  display_name: "Douban Library Data"
+  short_description: "Fetch Douban books into books-data.js"
+  default_prompt: "Use $douban-library-data to fetch Douban book links and update category-manager/books-data.js."
+policy:
+  allow_implicit_invocation: true
