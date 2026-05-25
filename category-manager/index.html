@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>开过头先生的藏书阁</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <label class="field">
+          <span>搜索</span>
+          <input id="searchInput" type="search" autocomplete="off" placeholder="书名、作者、ID">
+        </label>
+
+        <div class="new-category">
+          <input id="newCategoryInput" type="text" autocomplete="off" placeholder="新增分类">
+          <button id="addCategoryBtn" type="button" title="新增分类">添加</button>
+        </div>
+
+        <nav id="categoryNav" class="category-nav" aria-label="分类"></nav>
+
+        <div class="rail-actions">
+          <button id="exportJsonBtn" type="button">导出 JSON</button>
+          <button id="exportTsvBtn" type="button">导出 TSV</button>
+          <label class="import-btn">
+            导入 JSON
+            <input id="importJsonInput" type="file" accept="application/json,.json">
+          </label>
+          <button id="resetBtn" type="button">重置</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div class="toolbar-title">
+            <button id="toggleRailBtn" class="rail-toggle" type="button" title="隐藏分类列表" aria-label="隐藏分类列表">
+              <span class="sidebar-icon" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+            </button>
+            <div class="brand-mark">DB</div>
+            <div>
+              <div class="eyebrow">Douban Library</div>
+              <h2>开过头先生的藏书阁</h2>
+            </div>
+          </div>
+          <div class="toolbar-right">
+            <div class="stats">
+              <div><strong id="bookCount">0</strong><span>书籍</span></div>
+              <div><strong id="categoryCount">0</strong><span>分类</span></div>
+              <div><strong id="changedCount">0</strong><span>变更</span></div>
+            </div>
+          </div>
+        </header>
+
+        <section id="board" class="board" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <script src="./books-data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

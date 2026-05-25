@@ -1,0 +1,588 @@
+const STORAGE_KEY = "douban-category-manager-state-v1";
+const RAIL_STORAGE_KEY = "douban-category-manager-rail-visible-v1";
+const BOOK_METADATA_KEYS = ["作者", "国籍", "译者", "出版社", "出版年", "ISBN", "页数", "装帧", "定价", "原作名", "评分", "评分人数"];
+
+const initialData = window.BOOK_CATEGORY_DATA ?? { categories: [], books: [] };
+let books = clone(initialData.books).map(cleanBook);
+let categories = [...initialData.categories];
+let activeCategories = new Set();
+let ratingSortedCategories = new Set();
+let query = "";
+
+const els = {
+  board: document.querySelector("#board"),
+  categoryNav: document.querySelector("#categoryNav"),
+  searchInput: document.querySelector("#searchInput"),
+  newCategoryInput: document.querySelector("#newCategoryInput"),
+  addCategoryBtn: document.querySelector("#addCategoryBtn"),
+  exportJsonBtn: document.querySelector("#exportJsonBtn"),
+  exportTsvBtn: document.querySelector("#exportTsvBtn"),
+  importJsonInput: document.querySelector("#importJsonInput"),
+  resetBtn: document.querySelector("#resetBtn"),
+  toggleRailBtn: document.querySelector("#toggleRailBtn"),
+  bookCount: document.querySelector("#bookCount"),
+  categoryCount: document.querySelector("#categoryCount"),
+  changedCount: document.querySelector("#changedCount"),
+};
+
+hydrate();
+hydrateRail();
+render();
+
+els.searchInput.addEventListener("input", (event) => {
+  query = event.target.value.trim().toLowerCase();
+  render();
+});
+
+els.addCategoryBtn.addEventListener("click", addCategory);
+els.newCategoryInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") addCategory();
+});
+
+els.exportJsonBtn.addEventListener("click", () => {
+  download("douban-category-updates.json", JSON.stringify(exportPayload(), null, 2), "application/json");
+});
+
+els.exportTsvBtn.addEventListener("click", () => {
+  const header = ["书名", "subject_id", "原分类", "当前分类", "分类内排序", "frontmatter分类", ...BOOK_METADATA_KEYS];
+  const orderById = categoryOrderById();
+  const rows = books.map((book) => [
+    book.title,
+    book.id,
+    book.originalCategory,
+    book.category,
+    orderById.get(book.id),
+    book.frontmatterCategory,
+    ...BOOK_METADATA_KEYS.map((key) => metadataText(book[key])),
+  ]);
+  download("douban-category-updates.tsv", [header, ...rows].map((row) => row.map(tsvCell).join("\t")).join("\n") + "\n", "text/tab-separated-values");
+});
+
+els.importJsonInput.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const payload = JSON.parse(await file.text());
+  const importedBooks = payload.books ?? payload;
+  const byId = new Map(importedBooks.map((book) => [book.id, book]));
+  const merged = books.map((book) => {
+    const imported = byId.get(book.id);
+    return imported?.category ? { ...book, category: imported.category } : book;
+  });
+  const importedOrder = importedBooks.map((book) => String(book.id ?? "")).filter(Boolean);
+  const order = new Map(importedOrder.map((id, index) => [id, index]));
+  books = merged.sort((a, b) => {
+    const aOrder = order.has(a.id) ? order.get(a.id) : Number.MAX_SAFE_INTEGER;
+    const bOrder = order.has(b.id) ? order.get(b.id) : Number.MAX_SAFE_INTEGER;
+    return aOrder - bOrder;
+  });
+  categories = unique([...(payload.categories ?? categories), ...books.map((book) => book.category)]);
+  persist();
+  render();
+  event.target.value = "";
+});
+
+els.resetBtn.addEventListener("click", () => {
+  books = clone(initialData.books).map(cleanBook);
+  categories = [...initialData.categories];
+  activeCategories = new Set();
+  ratingSortedCategories = new Set();
+  query = "";
+  els.searchInput.value = "";
+  localStorage.removeItem(STORAGE_KEY);
+  render();
+});
+
+els.toggleRailBtn.addEventListener("click", () => setRailVisible(document.body.classList.contains("rail-hidden")));
+
+function hydrate() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) return;
+  try {
+    const state = JSON.parse(saved);
+    if (Array.isArray(state.books) && Array.isArray(state.categories)) {
+      books = mergeSavedBooks(state.books);
+      categories = unique([...state.categories, ...books.map((book) => book.category)]);
+    }
+  } catch {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+}
+
+function hydrateRail() {
+  const visible = localStorage.getItem(RAIL_STORAGE_KEY);
+  setRailVisible(visible !== "false", { persist: false });
+}
+
+function setRailVisible(visible, { persist = true } = {}) {
+  document.body.classList.toggle("rail-hidden", !visible);
+  const label = visible ? "隐藏分类列表" : "显示分类列表";
+  els.toggleRailBtn.title = label;
+  els.toggleRailBtn.setAttribute("aria-label", label);
+  els.toggleRailBtn.setAttribute("aria-expanded", String(visible));
+  if (persist) localStorage.setItem(RAIL_STORAGE_KEY, String(visible));
+}
+
+function render() {
+  const visibleBooks = books.filter(matchesQuery);
+  const changed = books.filter((book) => book.category !== book.originalCategory);
+  const grouped = groupByCategory(visibleBooks);
+  const categoryList = orderedCategories();
+  const renderedCategories = activeCategories.size === 0
+    ? categoryList
+    : categoryList.filter((category) => activeCategories.has(category));
+
+  els.bookCount.textContent = String(visibleBooks.length);
+  els.categoryCount.textContent = String(categoryList.length);
+  els.changedCount.textContent = String(changed.length);
+
+  renderNav(categoryList);
+  els.board.innerHTML = renderedCategories.map((category) => categoryPanel(category, grouped.get(category) ?? [])).join("");
+  bindDragEvents();
+}
+
+function renderNav(categoryList) {
+  const counts = new Map();
+  for (const book of books.filter(matchesQuery)) counts.set(book.category, (counts.get(book.category) ?? 0) + 1);
+  const items = ["全部", ...categoryList];
+  els.categoryNav.innerHTML = items.map((category) => {
+    const count = category === "全部" ? books.filter(matchesQuery).length : counts.get(category) ?? 0;
+    const active = category === "全部" ? activeCategories.size === 0 : activeCategories.has(category);
+    const draggable = category === "全部" ? "" : ` draggable="true"`;
+    return `<button class="nav-item ${active ? "is-active" : ""}" type="button" data-category="${escapeAttr(category)}"${draggable}>
+      <span>${escapeHtml(category)}</span>
+      <span class="nav-count">${count}</span>
+    </button>`;
+  }).join("");
+
+  els.categoryNav.querySelectorAll(".nav-item").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      selectCategory(button.dataset.category, event.metaKey || event.ctrlKey);
+      render();
+    });
+    button.addEventListener("dragstart", (event) => {
+      const category = button.dataset.category;
+      if (category === "全部") return;
+      button.classList.add("is-dragging");
+      event.dataTransfer.setData("application/x-category", category);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    button.addEventListener("dragover", (event) => {
+      const category = button.dataset.category;
+      if (category === "全部") return;
+      const draggedCategory = event.dataTransfer.types.includes("application/x-category");
+      const draggedBook = event.dataTransfer.types.includes("application/x-book-id") || event.dataTransfer.types.includes("text/plain");
+      if (!draggedCategory && !draggedBook) return;
+
+      event.preventDefault();
+      clearNavDropClasses(button);
+      if (draggedCategory) {
+        button.classList.add(getCategoryDropPosition(event, button) === "after" ? "is-drop-after" : "is-drop-before");
+      } else {
+        button.classList.add("is-drop-target");
+      }
+    });
+    button.addEventListener("dragleave", () => {
+      clearNavDropClasses(button);
+    });
+    button.addEventListener("drop", (event) => {
+      const category = button.dataset.category;
+      if (category === "全部") return;
+      event.preventDefault();
+      const draggedCategory = event.dataTransfer.getData("application/x-category");
+      clearNavDropClasses(button);
+      if (draggedCategory) {
+        moveCategory(draggedCategory, category, getCategoryDropPosition(event, button));
+        return;
+      }
+
+      const id = event.dataTransfer.getData("application/x-book-id") || event.dataTransfer.getData("text/plain");
+      moveBook(id, category);
+    });
+    button.addEventListener("dragend", () => {
+      button.classList.remove("is-dragging");
+      els.categoryNav.querySelectorAll(".nav-item").forEach(clearNavDropClasses);
+    });
+  });
+}
+
+function categoryPanel(category, items) {
+  const sorted = booksForCategoryView(category, items);
+  const isRatingSorted = ratingSortedCategories.has(category);
+  const sortLabel = isRatingSorted ? "恢复原顺序" : "按评分排序";
+  const cards = sorted.length > 0
+    ? sorted.map(bookCard).join("")
+    : `<div class="empty">空</div>`;
+
+  return `<article class="category-panel" data-category="${escapeAttr(category)}">
+    <header class="category-header" draggable="true" data-category="${escapeAttr(category)}">
+      <div>
+        <div class="category-title">${escapeHtml(category)}<span class="category-count">（${items.length} 本）</span></div>
+      </div>
+      <button class="rating-sort-btn ${isRatingSorted ? "is-active" : ""}" type="button" data-category="${escapeAttr(category)}" title="${sortLabel}" aria-label="${sortLabel}" draggable="false">
+        <span>评分</span>
+      </button>
+    </header>
+    <div class="book-list" data-category="${escapeAttr(category)}">${cards}</div>
+  </article>`;
+}
+
+function bookCard(book) {
+  const changed = book.category !== book.originalCategory;
+  const rating = bookRating(book) ? `<span class="rating-pill">${escapeHtml(bookRating(book))}</span>` : "";
+  const changedChip = changed ? `<span class="chip changed-mark">${escapeHtml(book.originalCategory)} -> ${escapeHtml(book.category)}</span>` : "";
+  const fmChip = book.frontmatterCategory && book.frontmatterCategory !== book.category
+    ? `<span class="chip">属性 ${escapeHtml(book.frontmatterCategory)}</span>`
+    : "";
+  const metaRow = fmChip || changedChip
+    ? `<div class="card-meta">${fmChip}${changedChip}</div>`
+    : "";
+
+  return `<div class="book-card ${changed ? "has-change" : ""}" draggable="true" data-id="${escapeAttr(book.id)}">
+    <div class="book-main">
+      <a class="book-title" href="https://book.douban.com/subject/${escapeAttr(book.id)}/" target="_blank" rel="noreferrer">${escapeHtml(book.title)}</a>
+      <span class="inline-chip">${escapeHtml(book.id)}</span>
+      ${rating}
+    </div>
+    ${metaRow}
+  </div>`;
+}
+
+function bindDragEvents() {
+  els.board.querySelectorAll(".rating-sort-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleRatingSort(button.dataset.category);
+    });
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("dragstart", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  });
+
+  els.board.querySelectorAll(".category-header").forEach((header) => {
+    header.addEventListener("dragstart", (event) => {
+      if (event.target.closest(".rating-sort-btn")) return;
+      header.classList.add("is-dragging");
+      event.dataTransfer.setData("application/x-category", header.dataset.category);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    header.addEventListener("dragend", () => {
+      header.classList.remove("is-dragging");
+      els.board.querySelectorAll(".category-panel").forEach(clearPanelDropClasses);
+      els.categoryNav.querySelectorAll(".nav-item").forEach(clearNavDropClasses);
+    });
+  });
+
+  els.board.querySelectorAll(".category-panel").forEach((panel) => {
+    panel.addEventListener("dragover", (event) => {
+      const draggedCategory = event.dataTransfer.types.includes("application/x-category");
+      if (!draggedCategory) return;
+      event.preventDefault();
+      clearPanelDropClasses(panel);
+      panel.classList.add(getPanelDropPosition(event, panel) === "after" ? "is-drop-after" : "is-drop-before");
+    });
+    panel.addEventListener("dragleave", (event) => {
+      if (panel.contains(event.relatedTarget)) return;
+      clearPanelDropClasses(panel);
+    });
+    panel.addEventListener("drop", (event) => {
+      const draggedCategory = event.dataTransfer.getData("application/x-category");
+      if (!draggedCategory) return;
+      event.preventDefault();
+      clearPanelDropClasses(panel);
+      moveCategory(draggedCategory, panel.dataset.category, getPanelDropPosition(event, panel));
+    });
+  });
+
+  els.board.querySelectorAll(".book-card").forEach((card) => {
+    card.addEventListener("dragstart", (event) => {
+      card.classList.add("is-dragging");
+      event.dataTransfer.setData("application/x-book-id", card.dataset.id);
+      event.dataTransfer.setData("text/plain", card.dataset.id);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    card.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      card.classList.add("is-drop-before");
+    });
+    card.addEventListener("dragleave", () => card.classList.remove("is-drop-before"));
+    card.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      card.classList.remove("is-drop-before");
+      const id = event.dataTransfer.getData("application/x-book-id") || event.dataTransfer.getData("text/plain");
+      const targetCategory = card.closest(".book-list")?.dataset.category;
+      moveBook(id, targetCategory, card.dataset.id);
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("is-dragging");
+      els.board.querySelectorAll(".is-drop-before").forEach((item) => item.classList.remove("is-drop-before"));
+      els.board.querySelectorAll(".is-drop-after").forEach((item) => item.classList.remove("is-drop-after"));
+      els.board.querySelectorAll(".is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+      els.categoryNav.querySelectorAll(".nav-item").forEach(clearNavDropClasses);
+    });
+  });
+
+  els.board.querySelectorAll(".book-list").forEach((list) => {
+    list.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      list.closest(".category-panel")?.classList.add("is-drop-target");
+    });
+    list.addEventListener("dragleave", () => list.closest(".category-panel")?.classList.remove("is-drop-target"));
+    list.addEventListener("drop", (event) => {
+      event.preventDefault();
+      list.closest(".category-panel")?.classList.remove("is-drop-target");
+      const id = event.dataTransfer.getData("application/x-book-id") || event.dataTransfer.getData("text/plain");
+      moveBook(id, list.dataset.category);
+    });
+  });
+}
+
+function addCategory() {
+  const category = els.newCategoryInput.value.trim();
+  if (!category || categories.includes(category)) return;
+  categories = unique([...categories, category]);
+  activeCategories = new Set([category]);
+  els.newCategoryInput.value = "";
+  persist();
+  render();
+}
+
+function selectCategory(category, additive = false) {
+  if (category === "全部") {
+    activeCategories = new Set();
+    return;
+  }
+
+  if (!additive) {
+    activeCategories = new Set([category]);
+    return;
+  }
+
+  const next = new Set(activeCategories);
+  if (next.has(category)) {
+    next.delete(category);
+  } else {
+    next.add(category);
+  }
+  activeCategories = next;
+}
+
+function toggleRatingSort(category) {
+  if (!category) return;
+  const next = new Set(ratingSortedCategories);
+  if (next.has(category)) {
+    next.delete(category);
+  } else {
+    next.add(category);
+  }
+  ratingSortedCategories = next;
+  render();
+}
+
+function booksForCategoryView(category, items) {
+  if (!ratingSortedCategories.has(category)) return items;
+  return [...items].sort((a, b) => parseRating(bookRating(b)) - parseRating(bookRating(a)));
+}
+
+function parseRating(value) {
+  const rating = Number.parseFloat(value);
+  return Number.isFinite(rating) ? rating : -1;
+}
+
+function moveBook(id, category, beforeId = "") {
+  if (!id || !category || id === beforeId) return;
+  const fromIndex = books.findIndex((item) => item.id === id);
+  if (fromIndex < 0) return;
+  const currentCategory = books[fromIndex].category;
+
+  if (currentCategory === category && !beforeId) return;
+  if (beforeId && !books.some((item) => item.id === beforeId)) return;
+
+  const [book] = books.splice(fromIndex, 1);
+  book.category = category;
+
+  let insertIndex = beforeId ? books.findIndex((item) => item.id === beforeId) : -1;
+  if (insertIndex < 0) {
+    insertIndex = lastIndexInCategory(category) + 1;
+  }
+  books.splice(insertIndex, 0, book);
+  categories = unique([...categories, category]);
+  persist();
+  render();
+}
+
+function moveCategory(category, targetCategory, position = "before") {
+  if (!category || !targetCategory || category === targetCategory) return;
+  const next = orderedCategories();
+  const fromIndex = next.indexOf(category);
+  const targetIndex = next.indexOf(targetCategory);
+  if (fromIndex < 0 || targetIndex < 0) return;
+
+  next.splice(fromIndex, 1);
+  const adjustedTargetIndex = next.indexOf(targetCategory);
+  next.splice(position === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex, 0, category);
+  categories = next;
+  persist();
+  render();
+}
+
+function getCategoryDropPosition(event, button) {
+  const box = button.getBoundingClientRect();
+  return event.clientY > box.top + box.height / 2 ? "after" : "before";
+}
+
+function getPanelDropPosition(event, panel) {
+  const box = panel.getBoundingClientRect();
+  return event.clientY > box.top + box.height / 2 ? "after" : "before";
+}
+
+function clearNavDropClasses(item) {
+  item.classList.remove("is-drop-target", "is-drop-before", "is-drop-after");
+}
+
+function clearPanelDropClasses(item) {
+  item.classList.remove("is-drop-target", "is-drop-before", "is-drop-after");
+}
+
+function lastIndexInCategory(category) {
+  for (let index = books.length - 1; index >= 0; index -= 1) {
+    if (books[index].category === category) return index;
+  }
+  return books.length - 1;
+}
+
+function exportPayload() {
+  const orderById = categoryOrderById();
+  return {
+    exportedAt: new Date().toISOString(),
+    categories: orderedCategories(),
+    books: books.map((book) => ({
+      id: book.id,
+      title: book.title,
+      originalCategory: book.originalCategory,
+      category: book.category,
+      order: orderById.get(book.id),
+      frontmatterCategory: book.frontmatterCategory,
+      ...metadataPayload(book),
+    })),
+  };
+}
+
+function categoryOrderById() {
+  const counters = new Map();
+  const orderById = new Map();
+  for (const book of books) {
+    const next = (counters.get(book.category) ?? 0) + 1;
+    counters.set(book.category, next);
+    orderById.set(book.id, next);
+  }
+  return orderById;
+}
+
+function persist() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ categories, books }));
+}
+
+function orderedCategories() {
+  return unique([...categories, ...books.map((book) => book.category)]);
+}
+
+function matchesQuery(book) {
+  if (!query) return true;
+  return [
+    book.title,
+    book.id,
+    book.category,
+    book.frontmatterCategory,
+    ...BOOK_METADATA_KEYS.map((key) => metadataText(book[key])),
+  ].some((value) => String(value ?? "").toLowerCase().includes(query));
+}
+
+function groupByCategory(items) {
+  const grouped = new Map();
+  for (const item of items) {
+    if (!grouped.has(item.category)) grouped.set(item.category, []);
+    grouped.get(item.category).push(item);
+  }
+  return grouped;
+}
+
+function download(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function tsvCell(value) {
+  return String(value ?? "").replace(/\t/g, " ").replace(/\r?\n/g, " ");
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function mergeSavedBooks(savedBooks) {
+  const freshById = new Map(clone(initialData.books).map((book) => [book.id, cleanBook(book)]));
+  const seen = new Set();
+  const merged = [];
+
+  for (const savedBook of savedBooks) {
+    if (!savedBook?.id) continue;
+    const fresh = freshById.get(savedBook.id);
+    const book = cleanBook(fresh ? { ...fresh, category: savedBook.category || fresh.category } : savedBook);
+    if (fresh) book.originalCategory = fresh.originalCategory;
+    seen.add(savedBook.id);
+    merged.push(book);
+  }
+
+  for (const fresh of freshById.values()) {
+    if (!seen.has(fresh.id)) merged.push(cleanBook(fresh));
+  }
+
+  return merged;
+}
+
+function cleanBook(book) {
+  const next = { ...book };
+  delete next.file;
+  delete next.author;
+  delete next.rating;
+  delete next.ratingCount;
+  return next;
+}
+
+function metadataPayload(book) {
+  return Object.fromEntries(BOOK_METADATA_KEYS.filter((key) => book[key] !== undefined).map((key) => [key, book[key]]));
+}
+
+function metadataText(value) {
+  return Array.isArray(value) ? value.join(" / ") : String(value ?? "");
+}
+
+function bookRating(book) {
+  return metadataText(book["评分"]);
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
